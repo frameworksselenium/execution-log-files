@@ -1,0 +1,17 @@
+{
+  "name": "execution-log-files",
+  "version": "1.0.0",
+  "description": "Multi-threaded logging application",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node index.js",
+    "test:quick": "TOTAL_TEST_CASES=100 NUM_THREADS=10 MIN_RUNTIME_MINUTES=5 node index.js",
+    "test:full": "TOTAL_TEST_CASES=500 NUM_THREADS=10 MIN_RUNTIME_MINUTES=15 node index.js",
+    "test:extended": "TOTAL_TEST_CASES=1000 NUM_THREADS=20 MIN_RUNTIME_MINUTES=30 node index.js"
+  },
+  "keywords": ["logging", "threads", "worker"],
+  "author": "",
+  "license": "ISC"
+}
