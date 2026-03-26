@@ -2,13 +2,11 @@ import { parentPort, workerData } from 'worker_threads';
 import fs from 'fs';
 import path from 'path';
 
-const { workerId, dataFolder, testCasesPerThread, stepDelayMs } = workerData;
+const { workerId, dataFolder, assignedTestCases, stepDelayMs } = workerData;
 
-// Log file path for this worker
-const logFilePath = path.join(dataFolder, `process_${workerId}.log`);
-
-// Create write stream for logging
-const logStream = fs.createWriteStream(logFilePath, { flags: 'w' });
+// Runner file only (no process log file)
+const runnerFilePath = path.join(dataFolder, `runner${workerId - 1}.txt`);
+const runnerStream = fs.createWriteStream(runnerFilePath, { flags: 'w' });
 
 // Statistics
 const stats = {
@@ -18,12 +16,15 @@ const stats = {
   total: 0
 };
 
-// Helper function to write logs
+// Log to console only (no log file)
 function writeLog(message) {
   const timestamp = new Date().toISOString();
-  const logEntry = `[${timestamp}] [Worker-${workerId}] ${message}\n`;
-  logStream.write(logEntry);
-  console.log(`[Worker-${workerId}] ${message}`);
+  console.log(`[${timestamp}] [Worker-${workerId}] ${message}`);
+}
+
+// Helper function to write to runner file
+function writeRunner(message) {
+  runnerStream.write(message + '\n');
 }
 
 // Helper function to send message to parent
@@ -39,8 +40,7 @@ function sleep(ms) {
 }
 
 // Simulate test step execution
-async function executeTestStep(testCaseId, stepNumber) {
-  const stepName = `Step ${stepNumber}`;
+async function executeTestStep(stepNumber, tcLabel, stepCount) {
   const actions = [
     'Initializing test data',
     'Validating input parameters',
@@ -49,53 +49,63 @@ async function executeTestStep(testCaseId, stepNumber) {
     'Cleaning up resources'
   ];
   
-  const action = actions[stepNumber - 1] || 'Processing';
-  writeLog(`  ├─ [TC-${testCaseId}] ${stepName}: ${action}`);
+  const action = actions[(stepNumber - 1) % actions.length];
+  writeLog(`  ├─ [${tcLabel}] Step ${stepNumber}/${stepCount}: ${action}`);
+  
+  // Write to runner file
+  writeRunner(`|STEP START|${tcLabel}|${action}`);
   
   // Simulate work with sleep
   await sleep(stepDelayMs);
   
+  // Write step end to runner file
+  writeRunner(`|STEP END|${tcLabel}|${action}`);
+  
   // Simulate occasional warnings
   if (Math.random() > 0.95) {
-    writeLog(`  │  └─ [TC-${testCaseId}] ${stepName}: Warning - Minor issue detected but continuing`);
+    writeLog(`  │  └─ [${tcLabel}] Step ${stepNumber}: Warning - Minor issue detected but continuing`);
   }
 }
 
-// Execute a single test case
-async function executeTestCase(testCaseId) {
+// Execute a single test case using CSV entry { testCase, stepCount }
+async function executeTestCase(tcEntry) {
   const startTime = Date.now();
-  
+  const tcLabel   = tcEntry.testCase;        // e.g. "TC-1"
+  const stepCount = tcEntry.stepCount || 5;  // from CSV column
+
   try {
-    // Test case started
-    writeLog(`┌─ [TC-${testCaseId}] TEST CASE STARTED - Test Case ${testCaseId}`);
-    writeLog(`│  [TC-${testCaseId}] Description: Automated test execution for scenario ${testCaseId}`);
-    
+    writeRunner(`SCENARIO START|${tcLabel}`);
+    writeLog(`┌─ [${tcLabel}] TEST CASE STARTED (${stepCount} steps)`);
+
     stats.total++;
-    
-    // Execute 5 steps
-    for (let step = 1; step <= 5; step++) {
-      await executeTestStep(testCaseId, step);
+
+    for (let step = 1; step <= stepCount; step++) {
+      await executeTestStep(step, tcLabel, stepCount);
     }
-    
-    // Simulate test result (95% pass rate)
-    const passed = Math.random() > 0.05;
+
+    const passed   = Math.random() > 0.05;
     const duration = Date.now() - startTime;
-    
+
+    writeRunner(`SCENARIO END|${tcLabel}`);
+    writeRunner('');
+
     if (passed) {
       stats.passed++;
-      writeLog(`└─ [TC-${testCaseId}] TEST CASE PASSED - Duration: ${duration}ms`);
-      return { testCaseId, status: 'PASSED', duration };
+      writeLog(`└─ [${tcLabel}] TEST CASE PASSED - Duration: ${duration}ms`);
+      return { tcLabel, status: 'PASSED', duration };
     } else {
       stats.failed++;
-      writeLog(`└─ [TC-${testCaseId}] TEST CASE FAILED - Expected: true, Actual: false - Duration: ${duration}ms`);
-      return { testCaseId, status: 'FAILED', duration };
+      writeLog(`└─ [${tcLabel}] TEST CASE FAILED - Duration: ${duration}ms`);
+      return { tcLabel, status: 'FAILED', duration };
     }
-    
+
   } catch (error) {
     stats.failed++;
     const duration = Date.now() - startTime;
-    writeLog(`└─ [TC-${testCaseId}] TEST CASE ERROR - ${error.message} - Duration: ${duration}ms`);
-    return { testCaseId, status: 'ERROR', duration, error: error.message };
+    writeLog(`└─ [${tcLabel}] TEST CASE ERROR - ${error.message} - Duration: ${duration}ms`);
+    writeRunner(`SCENARIO END|${tcLabel}`);
+    writeRunner('');
+    return { tcLabel, status: 'ERROR', duration, error: error.message };
   }
 }
 
@@ -105,30 +115,28 @@ async function runTests() {
   
   writeLog('='.repeat(70));
   writeLog('Worker thread started - Test execution beginning');
-  writeLog(`Total test cases to execute: ${testCasesPerThread}`);
-  writeLog(`Log file: ${logFilePath}`);
-  writeLog(`Step delay: ${stepDelayMs}ms`);
+  writeLog(`Assigned test cases : ${assignedTestCases.length}`);
+  writeLog(`Range               : ${assignedTestCases[0]?.testCase} → ${assignedTestCases[assignedTestCases.length - 1]?.testCase}`);
+  writeLog(`Runner file         : ${runnerFilePath}`);
+  writeLog(`Step delay          : ${stepDelayMs}ms`);
   writeLog('='.repeat(70));
   
-  notifyParent('Started', { testCasesPerThread });
+  notifyParent('Started', { assignedCount: assignedTestCases.length });
   
-  // Calculate test case IDs for this worker
-  const startTestId = (workerId - 1) * testCasesPerThread + 1;
   const results = [];
   
-  // Execute all test cases sequentially
-  for (let i = 0; i < testCasesPerThread; i++) {
-    const testCaseId = startTestId + i;
-    const result = await executeTestCase(testCaseId);
+  // Execute all assigned test cases from CSV
+  for (let i = 0; i < assignedTestCases.length; i++) {
+    const result = await executeTestCase(assignedTestCases[i]);
     results.push(result);
     
     // Progress update every 10 test cases
     if ((i + 1) % 10 === 0) {
-      const progress = ((i + 1) / testCasesPerThread * 100).toFixed(1);
-      writeLog(`\n>>> Progress: ${i + 1}/${testCasesPerThread} (${progress}%) | Passed: ${stats.passed}, Failed: ${stats.failed}\n`);
+      const progress = ((i + 1) / assignedTestCases.length * 100).toFixed(1);
+      writeLog(`\n>>> Progress: ${i + 1}/${assignedTestCases.length} (${progress}%) | Passed: ${stats.passed}, Failed: ${stats.failed}\n`);
       notifyParent('Progress', { 
         completed: i + 1, 
-        total: testCasesPerThread, 
+        total: assignedTestCases.length, 
         stats: { ...stats }
       });
     }
@@ -155,8 +163,7 @@ async function runTests() {
     results
   });
   
-  // Close log stream and exit
-  logStream.end(() => {
+  runnerStream.end(() => {
     process.exit(stats.failed > 0 ? 1 : 0);
   });
 }
@@ -166,14 +173,12 @@ runTests().catch((error) => {
   writeLog(`FATAL ERROR: ${error.message}`);
   writeLog(error.stack);
   notifyParent('Error', { error: error.message });
-  logStream.end(() => {
-    process.exit(1);
-  });
+  runnerStream.end(() => process.exit(1));
 });
 
 // Handle termination
 process.on('SIGTERM', () => {
   writeLog('Worker terminated by parent');
-  logStream.end();
+  runnerStream.end();
   process.exit(1);
 });

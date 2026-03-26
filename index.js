@@ -7,20 +7,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Configuration
-const TOTAL_TEST_CASES = 500;
-const NUM_THREADS = 10;
-const MIN_RUNTIME_MINUTES = 15;
-const DATA_FOLDER = './data';
+const TOTAL_TEST_CASES = parseInt(process.env.TOTAL_TEST_CASES) || 500;
+const NUM_THREADS = parseInt(process.env.NUM_THREADS) || 10;
+const MIN_RUNTIME_MINUTES = parseFloat(process.env.MIN_RUNTIME_MINUTES) || 15;
+const DATA_FOLDER = process.env.DATA_FOLDER || './data';
 
 // Calculate distribution
 const TEST_CASES_PER_THREAD = Math.ceil(TOTAL_TEST_CASES / NUM_THREADS);
-const ACTUAL_TOTAL_TESTS = TEST_CASES_PER_THREAD * NUM_THREADS;
 
 // Calculate timing to ensure minimum runtime
-// Each test case has: start log + 5 steps + end log = 7 operations
-// Minimum runtime = 15 minutes = 900 seconds
-// Time per test case = 900 / (ACTUAL_TOTAL_TESTS / NUM_THREADS) 
-// We need to run tests sequentially in each thread
 const minSecondsPerThread = MIN_RUNTIME_MINUTES * 60;
 const timePerTestCase = minSecondsPerThread / TEST_CASES_PER_THREAD;
 // Distribute time across 5 steps (in milliseconds)
@@ -43,19 +38,63 @@ if (!fs.existsSync(DATA_FOLDER)) {
   // Clean up old log files
   const files = fs.readdirSync(DATA_FOLDER);
   files.forEach(file => {
-    if (file.endsWith('.log')) {
+    if (file.startsWith('runner') || file === 'step-count.csv') {
       fs.unlinkSync(path.join(DATA_FOLDER, file));
     }
   });
   console.log(`✓ Cleaned data folder: ${DATA_FOLDER}`);
 }
 
+// Generate step-count.csv file
+function generateStepCountCSV() {
+  const csvPath = path.join(DATA_FOLDER, 'step-count.csv');
+  let csvContent = 'Test Case,Step Count\n';
+  
+  for (let i = 1; i <= TOTAL_TEST_CASES; i++) {
+    csvContent += `TC-${i},5\n`;
+  }
+  
+  fs.writeFileSync(csvPath, csvContent, 'utf8');
+  console.log(`✓ Generated step-count.csv with ${TOTAL_TEST_CASES} test cases`);
+}
+
+generateStepCountCSV();
+
+// Read step-count.csv and return array of { testCase, stepCount }
+function loadTestCasesFromCSV() {
+  const csvPath = path.join(DATA_FOLDER, 'step-count.csv');
+  const lines = fs.readFileSync(csvPath, 'utf8').trim().split('\n');
+  // Skip header
+  return lines.slice(1).map(line => {
+    const [testCase, stepCount] = line.split(',');
+    return { testCase: testCase.trim(), stepCount: parseInt(stepCount.trim()) };
+  });
+}
+
+// Split array into N chunks
+function chunkArray(arr, n) {
+  const chunks = [];
+  const size = Math.ceil(arr.length / n);
+  for (let i = 0; i < n; i++) {
+    chunks.push(arr.slice(i * size, (i + 1) * size));
+  }
+  return chunks;
+}
+
+// Load all test cases from CSV and distribute
+const allTestCases = loadTestCasesFromCSV();
+const testCaseChunks = chunkArray(allTestCases, NUM_THREADS);
+
+console.log(`✓ Loaded ${allTestCases.length} test cases from step-count.csv`);
+
 // Function to create and start a worker thread
 function createWorker(workerId) {
+  const assignedTestCases = testCaseChunks[workerId - 1] || [];
+
   globalStats.workers[workerId] = {
     status: 'running',
     completed: 0,
-    total: TEST_CASES_PER_THREAD,
+    total: assignedTestCases.length,
     passed: 0,
     failed: 0
   };
@@ -64,7 +103,7 @@ function createWorker(workerId) {
     workerData: {
       workerId,
       dataFolder: DATA_FOLDER,
-      testCasesPerThread: TEST_CASES_PER_THREAD,
+      assignedTestCases,
       stepDelayMs: STEP_DELAY_MS
     }
   });
@@ -73,7 +112,7 @@ function createWorker(workerId) {
     const { message, data, workerId: wId } = msg;
     
     if (message === 'Started') {
-      console.log(`[Main] Worker ${wId}: Started - ${data.testCasesPerThread} test cases assigned`);
+      console.log(`[Main] Worker ${wId}: Started - ${data.assignedCount} test cases assigned`);
     } else if (message === 'Progress') {
       globalStats.workers[wId].completed = data.completed;
       globalStats.workers[wId].passed = data.stats.passed;
@@ -163,9 +202,9 @@ function printFinalSummary() {
 console.log('='.repeat(80));
 console.log('AUTOMATED TEST EXECUTION FRAMEWORK');
 console.log('='.repeat(80));
-console.log(`Total Test Cases: ${TOTAL_TEST_CASES}`);
+console.log(`Total Test Cases (from CSV): ${allTestCases.length}`);
 console.log(`Threads: ${NUM_THREADS}`);
-console.log(`Test Cases per Thread: ${TEST_CASES_PER_THREAD}`);
+console.log(`Test Cases per Thread: ~${TEST_CASES_PER_THREAD}`);
 console.log(`Minimum Runtime: ${MIN_RUNTIME_MINUTES} minutes`);
 console.log(`Step Delay: ${STEP_DELAY_MS}ms`);
 console.log(`Estimated Runtime: ~${(TEST_CASES_PER_THREAD * timePerTestCase / 60).toFixed(1)} minutes per thread`);
@@ -176,9 +215,12 @@ console.log('='.repeat(80));
 const workers = [];
 console.log('\nStarting worker threads...\n');
 for (let i = 1; i <= NUM_THREADS; i++) {
+  const chunk = testCaseChunks[i - 1] || [];
+  const first = chunk[0]?.testCase || '-';
+  const last = chunk[chunk.length - 1]?.testCase || '-';
   const worker = createWorker(i);
   workers.push(worker);
-  console.log(`✓ Worker ${i} started - Test cases ${((i-1) * TEST_CASES_PER_THREAD) + 1} to ${i * TEST_CASES_PER_THREAD}`);
+  console.log(`✓ Worker ${i} started - ${chunk.length} test cases (${first} → ${last})`);
 }
 
 console.log('\n' + '='.repeat(80));
